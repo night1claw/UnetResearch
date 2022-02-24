@@ -1,6 +1,7 @@
 import livelossplot
 import torch
 import cv2
+import torchvision
 from PIL import ImageFilter
 from numpy import random
 from torch import nn
@@ -16,6 +17,8 @@ from torchvision.transforms import transforms
 from torchsummary import summary
 import time
 import threading
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
 #################### ML Device #######################################
 device = 'cuda'
@@ -252,7 +255,8 @@ class Net(nn.Module):
 
         self.conv0 = nn.Sequential(
             nn.Conv2d(32, 1, 3, 1, 1),
-            nn.Sigmoid()
+            #nn.Sigmoid()
+            nn.ReLU()
         )
 
         self.max_pool = nn.MaxPool2d(2)
@@ -320,7 +324,7 @@ class GaussDataset(Dataset):
         else:
             return blur_image
 
-def create_dataset(batch_size = 8, kx=15, ky=3):
+def create_dataset(batch_size = 8, noise_level=0.0):
     images_train = read_images(DATA_PATH_TRAIN)
     print(images_train.shape)
     print(type(images_train))
@@ -334,14 +338,17 @@ def create_dataset(batch_size = 8, kx=15, ky=3):
     labels_test = read_labels(LABEL_PATH_TEST)
     print(labels_test.shape)
 
-    images_train_blur = create_blur_set(images_train, kx, ky)
+    #images_train_blur = create_blur_set(images_train, kx, ky)
+
+
+    images_train = normalize_min_max(images_train, 0.0, 1.0)
+
+    images_train_blur = np.add(images_train, noise_level * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(images_train)) / 6., size=images_train.shape))
+    images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
     print(images_train_blur.shape)
 
-    images_train_blur = images_train_blur.astype(np.float32)
-    images_train_blur = images_train_blur / 255.
-
     images_train = images_train.astype(np.float32)
-    images_train = images_train / 255.
+    images_train_blur = images_train_blur.astype(np.float32)
 
     (x_train, x_val, y_train, y_val) = train_test_split(images_train_blur, images_train, test_size=0.25)
     #print("Data shapes:")
@@ -385,9 +392,9 @@ def train_step(model, dataLoader, optimizer, criterion, epoch):
     model.train()
     running_loss = 0.0
     print(' ')
-    print('Train Step')
-    #for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0,leave=True):
-    for i, data in enumerate(dataLoader):
+    print('Train Step:', epoch)
+    for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0,leave=True):
+    #for i, data in enumerate(dataLoader):
         blur_img = data[0].to(device)
         sharp_img = data[1].to(device)
         optimizer.zero_grad()
@@ -398,7 +405,7 @@ def train_step(model, dataLoader, optimizer, criterion, epoch):
         optimizer.step()
         running_loss += loss.item()
     train_loss = running_loss/len(dataLoader.dataset)
-    print(f"Train Loss: {train_loss:.5f}")
+    #print(f"Train Loss: {train_loss:.5f}")
 
     return train_loss
 
@@ -406,57 +413,63 @@ def train_step(model, dataLoader, optimizer, criterion, epoch):
 def val_step(model, dataLoader, optimizer, criterion, epoch):
     model.eval()
     running_loss = 0.0
-    print(' ')
-    print('Eval Step')
+    #print(' ')
+    #print('Eval Step')
     with torch.no_grad():
         #for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0, leave=True):
         for i, data in enumerate(dataLoader):
             blur_img = data[0].to(device)
             sharp_img = data[1].to(device)
             output = model_RGB(model, blur_img)
-
-            if epoch % 5:
-                sample1 = blur_img[0].cpu()
-                sample2 = output[0].cpu()
-                sample3 = sharp_img[0].cpu()
-                plot_sample(sample1, sample2, sample3, epoch)
-
+            samples = torch.stack([blur_img[0], output[0], sharp_img[0]], dim=0)
             loss = criterion(output, sharp_img)
             running_loss += loss.item()
         val_loss = running_loss / len(dataLoader.dataset)
-        print(f"Val Loss: {val_loss:.5f}")
+        #print(f"Val Loss: {val_loss:.5f}")
 
-        return val_loss
+        return val_loss, samples
 
 def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler):
     train_loss = []
     val_loss = []
     min_loss = sys.float_info.max
+    tb = SummaryWriter()
     start = time.time()
+    now = datetime.now()
+    current_time = now.strftime("%H_%M_%S")
+    last_ck = './checkpoints/Model_' + current_time + '.pth'
+    print("Check . tensorboard --logdir=runs . for logs")
 
-    for epoch in tqdm.tqdm(range(nr_epoch), total=nr_epoch, position=0, leave=True):
+    for epoch in range(nr_epoch):
         logs = {}
         train_epoch_loss = train_step(model, trainLoader, optimizer, criterion, epoch)
-        val_epoch_loss = val_step(model, valLoader, optimizer, criterion, epoch)
+        val_epoch_loss, samples = val_step(model, valLoader, optimizer, criterion, epoch)
         train_loss.append(train_epoch_loss)
         val_loss.append(val_epoch_loss)
         lr_scheduler.step(val_epoch_loss)
 
 
-        plot_loss(train_loss, val_loss)
+        #plot_loss(train_loss, val_loss)
+        tb.add_scalar("Train Loss", train_epoch_loss, epoch)
+        tb.add_scalar("Val Loss", val_epoch_loss, epoch)
+        #tb.add_image('Input - Gauss', samples[0])
+        #tb.add_image('Output', samples[1])
+        #tb.add_image('Original -
+        print(samples.shape)
+        img_grid = torchvision.utils.make_grid(samples)
+        tb.add_image("Input - Output - Original", img_grid)
 
         if val_epoch_loss < min_loss:
             min_loss = val_epoch_loss
         print(f"################################ \n")
         print(f"Epoch Losses - Min Val: {min_loss:.5f} \n")
         print(f"Train: {train_epoch_loss:.5f} & Val: {val_epoch_loss:.5f} \n")
+        save_checkpoint(last_ck, model, optimizer)
+        print('Saved Checkpoint!')
         print(f"################################ \n")
 
-        if not epoch % 5:
-            save_checkpoint('./checkpoints/latestModel.pth', model, optimizer)
-            print('Saved Checkpoint!')
-
     end = time.time()
+    tb.close()
     print(f"Took {((end - start) / 60):.3f} minutes to train")
 
 def plot_loss(train_loss, val_loss):
@@ -518,11 +531,12 @@ def plot_sample(sample1, sample2, sample3, epoch):
     imgplot = plt.imshow(sample3)
     ax.set_title('Target - Sharp')
     plt.savefig("./comparisons/Comparison-Epoch" + str(epoch) + ".png")
+    plt.close("all")
 
 if __name__ == '__main__':
     nr_epoch = 100
-
-    trainLoader, valLoader = create_dataset(batch_size=8,kx=15, ky=3)
+    #matplotlib.use('Agg')
+    trainLoader, valLoader = create_dataset(batch_size=8, noise_level=0.25)
     #check_pairs(trainLoader)
 
     model, criterion, lr_scheduler, optimizer = initialize_model(train=True)
@@ -530,3 +544,5 @@ if __name__ == '__main__':
     #compare_gauss()
     #checkpoint = './checkpoints/16-02-2022-DeblurSTD.pth'
     #visual_test(model, optimizer, checkpoint, valLoader)
+
+    #image += noise_level * torch.normal(mean=0, std=(image.max() - image.min()) / 6., size=image.shape).cuda()
