@@ -1,4 +1,5 @@
 import livelossplot
+import tensorboard.summary
 import torch
 import cv2
 import torchvision
@@ -14,11 +15,15 @@ import tqdm
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import transforms
-from torchsummary import summary
+from torchinfo import summary
 import time
 import threading
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+import base64
+import hashlib
+#from Crypto import Random
+#from Crypto.Cipher import AES
 
 #################### ML Device #######################################
 device = 'cuda'
@@ -114,10 +119,13 @@ def plot_image(image):
 
 
 def normalize_min_max(x, new_min=0.0, new_max=1.0):
-    min_val = np.min(x, 0, keepdims=True)
-    max_val = np.max(x, 0, keepdims=True)
-    x = (x - min_val) / (max_val - min_val + 1e-12)
+    min_val = np.min(x)
+    #print("Min", min_val)
+    max_val = np.max(x)
+    #print("Max", max_val)
+    x = (x - min_val) / (max_val - min_val)
     x = x * (new_max - new_min) + new_min
+    #x = (x - np.min(x))/np.ptp(x)
     return x
 
 
@@ -132,36 +140,6 @@ def show_some_images(x, sqrtN, fig_num=99):
             plt.axis('off')
             i += 1
 
-
-def apply_gauss(in_image, ksizex, ksizey):
-    x = cv2.GaussianBlur(in_image, (ksizex, ksizey), 0)
-    return x
-
-
-def compare_gauss():
-    with open(DATA_PATH_TRAIN) as f:
-        image = read_single_image(f)
-        fig = plt.figure()
-        ax = fig.add_subplot(1, 2, 1)
-        imgplot = plt.imshow(image)
-        ax.set_title('Before')
-        image = apply_gauss(image, 3, 3)
-
-        ax = fig.add_subplot(1, 2, 2)
-        imgplot = plt.imshow(image)
-        ax.set_title('After')
-        plt.show()
-
-
-def create_blur_set(in_dataset, ksizex, ksizey):
-    output_dataset = np.zeros(in_dataset.shape)
-    tqdm_list = list(range(in_dataset.shape[0]))
-    print('Starting Blur')
-    for i in tqdm.tqdm(tqdm_list):
-        output_dataset[i, :, :, :] = cv2.GaussianBlur(in_dataset[i, :, :, :], (ksizex, ksizey), 0)
-    # print(i)
-    print('Done Blurring')
-    return output_dataset
 
 def check_pairs(dataLoader):
     for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0,
@@ -183,6 +161,35 @@ def check_pairs(dataLoader):
         ax.set_title('After - Deblurred')
         plt.show()
         time.sleep(4)
+
+# class AESCipher(object):
+#
+#     def __init__(self, key):
+#         self.bs = 32
+#         self.key = hashlib.sha256(key.encode()).digest()
+#
+#     def encrypt(self, raw):
+#         raw = self._pad(raw)
+#         iv = Random.new().read(AES.block_size)
+#         cipher = AES.new(self.key, AES.MODE_CBC, iv)
+#         return base64.b64encode(iv + cipher.encrypt(raw))
+#
+#     def decrypt(self, enc):
+#         enc = base64.b64decode(enc)
+#         iv = enc[:AES.block_size]
+#         cipher = AES.new(self.key, AES.MODE_CBC, iv)
+#         return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
+#         #return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
+#
+#     def _pad(self, s):
+#         #print("25")
+#         #print(type(s))
+#         #print(type((self.bs - len(s) % self.bs) * chr(self.bs - len(s) % self.bs)))
+#         return s + (self.bs - len(s) % self.bs) * chr(self.bs - len(s) % self.bs).encode('utf-8')
+#
+#     @staticmethod
+#     def _unpad(s):
+#         return s[:-ord(s[len(s)-1:])]
 
 
 #################### Model Helper Functions ##########################
@@ -302,6 +309,7 @@ def model_RGB(model, img_in):
   img_G = model(img_in[:, 1, :, :].unsqueeze(1))
   img_B = model(img_in[:, 2, :, :].unsqueeze(1))
   img_out = torch.cat((img_R, img_G, img_B), dim=1)
+  img_out = torch.clamp(img_out, 0., 1.)
   #print(img_out.shape)
   return img_out
 
@@ -324,31 +332,40 @@ class GaussDataset(Dataset):
         else:
             return blur_image
 
-def create_dataset(batch_size = 8, noise_level=0.0):
+
+def create_dataset_noise(tb, batch_size=8, noise_level_min=0.0, noise_level_max=0.5):
     images_train = read_images(DATA_PATH_TRAIN)
+    images_train_blur = read_images(DATA_PATH_TRAIN)
     print(images_train.shape)
-    print(type(images_train))
+    #print(type(images_train))
 
     labels_train = read_labels(LABEL_PATH_TRAIN)
-    print(labels_train.shape)
+    #print(labels_train.shape)
 
     images_test = read_images(DATA_PATH_TEST)
-    print(images_train.shape)
+    #print(images_train.shape)
 
     labels_test = read_labels(LABEL_PATH_TEST)
-    print(labels_test.shape)
-
-    #images_train_blur = create_blur_set(images_train, kx, ky)
-
-
-    images_train = normalize_min_max(images_train, 0.0, 1.0)
-
-    images_train_blur = np.add(images_train, noise_level * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(images_train)) / 6., size=images_train.shape))
-    images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
-    print(images_train_blur.shape)
+    #print(labels_test.shape)
 
     images_train = images_train.astype(np.float32)
     images_train_blur = images_train_blur.astype(np.float32)
+
+    #print("Max input:", np.max(images_train))
+    #print("Min input:", np.min(images_train))
+
+    images_train = normalize_min_max(images_train, 0.0, 1.0)
+    #print("Max input:", np.max(images_train))
+    #print("Min input:", np.min(images_train))
+    #images_train_blur = images_train
+
+    #images_train_blur = np.add(images_train, np.random.uniform(noise_level) * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(images_train)) / 6., size=images_train.shape))
+    for images in tqdm.tqdm(range(images_train_blur.shape[0]), total=images_train_blur.shape[0]):
+        images_train_blur[images] = np.add(images_train_blur[images], np.random.uniform(noise_level_min, noise_level_max) * np.random.normal(loc=0, scale=(np.max(images_train_blur[images]) - np.min(images_train_blur[images])) / 6., size=images_train_blur[images].shape))
+    images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
+    #print(images_train_blur.shape)
+
+
 
     (x_train, x_val, y_train, y_val) = train_test_split(images_train_blur, images_train, test_size=0.25)
     #print("Data shapes:")
@@ -364,9 +381,64 @@ def create_dataset(batch_size = 8, noise_level=0.0):
     val_data = GaussDataset(x_val, y_val)
     val_Loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
 
+    tb.add_text("Dataset", "Created dataset with: "
+                           "\nGaussian noise between:" + str(noise_level_min) + " and " + str(noise_level_max) +
+                           "\nBatch Size: " + str(batch_size) +
+                           "\nTraining size: " + str(x_train.shape[0]) +
+                           "\nValidation size:" + str(y_train.shape[0]))
+    random_index = int(np.random.random()*len(images_train))-5
+    tb.add_images("Dataset Examples - Original", images_train[random_index:random_index+5])
+    #print("Max input:", np.max(images_train))
+    #print("Min input:", np.min(images_train))
+    tb.add_images("Dataset Examples - Blurred", images_train_blur[random_index:random_index+5])
+
     return train_Loader, val_Loader
 
-def initialize_model(train=False):
+
+def create_dataset_encrypt(batch_size = 8, key=128):
+    images_train = read_images(DATA_PATH_TRAIN)
+    print(images_train.shape)
+    print(type(images_train))
+
+    labels_train = read_labels(LABEL_PATH_TRAIN)
+    print(labels_train.shape)
+
+    images_test = read_images(DATA_PATH_TEST)
+    print(images_train.shape)
+
+    labels_test = read_labels(LABEL_PATH_TEST)
+    print(labels_test.shape)
+
+    # images_train_blur = create_blur_set(images_train, kx, ky)
+
+    images_train = normalize_min_max(images_train, 0.0, 1.0)
+
+    #images_train_blur = np.add(images_train, noise_level * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(
+    #    images_train)) / 6., size=images_train.shape))
+    #images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
+    #print(images_train_blur.shape)
+
+    #images_train = images_train.astype(np.float32)
+    #images_train_blur = images_train_blur.astype(np.float32)
+
+    #(x_train, x_val, y_train, y_val) = train_test_split(images_train_blur, images_train, test_size=0.25)
+    # print("Data shapes:")
+    # print(f"x_train: {x_train.shape}")
+    # print(f"x_val: {x_val.shape}")
+    # print(f"y_train: {y_train.shape}")
+    # print(f"y_val: {y_val.shape}")
+    # print('Done shapes')
+
+    #train_data = GaussDataset(x_train, y_train)
+    #train_Loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+
+    #val_data = GaussDataset(x_val, y_val)
+    #val_Loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+
+    #return train_Loader, val_Loader
+
+
+def initialize_model(train=False, checkpoint='./checkpoints/latestModel.pth'):
     model = Net().to(device)
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-5)
     criterion = nn.MSELoss()
@@ -377,13 +449,13 @@ def initialize_model(train=False):
         factor=0.5,
         verbose=True
     )
-    summary(model, (1, 96, 96))
+    #summary(model, (1, 96, 96))
 
     if train:
         model.train()
     else:
         model.eval()
-        load_checkpoint('./checkpoints/latestModel.pth', model, optimizer)
+        load_checkpoint(checkpoint, model, optimizer)
 
     return model, criterion, lr_scheduler, optimizer
 
@@ -427,23 +499,38 @@ def val_step(model, dataLoader, optimizer, criterion, epoch):
         val_loss = running_loss / len(dataLoader.dataset)
         #print(f"Val Loss: {val_loss:.5f}")
 
+
+
         return val_loss, samples
 
-def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler):
+
+def get_sample(model, dataset):
+    model.eval()
+    with torch.no_grad():
+        data = iter(dataset).next()
+        blur_img = data[0].to(device)
+        sharp_img = data[1].to(device)
+        output = model_RGB(model, blur_img)
+    return blur_img[0], sharp_img[0], output[0]
+
+def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb):
     train_loss = []
     val_loss = []
     min_loss = sys.float_info.max
-    tb = SummaryWriter()
     start = time.time()
     now = datetime.now()
+    today = datetime.today()
+    today = today.strftime("%y_%m_%d")
     current_time = now.strftime("%H_%M_%S")
-    last_ck = './checkpoints/Model_' + current_time + '.pth'
+    last_ck = './checkpoints/Model_date_' + today + '_time_' + current_time + '.pth'
     print("Check . tensorboard --logdir=runs . for logs")
+    tb.add_text("Training model start", "Model trained on:" + today + " at :" + current_time)
 
     for epoch in range(nr_epoch):
         logs = {}
         train_epoch_loss = train_step(model, trainLoader, optimizer, criterion, epoch)
         val_epoch_loss, samples = val_step(model, valLoader, optimizer, criterion, epoch)
+        blur_img, sharp_img, output = get_sample(model, trainLoader)
         train_loss.append(train_epoch_loss)
         val_loss.append(val_epoch_loss)
         lr_scheduler.step(val_epoch_loss)
@@ -452,12 +539,12 @@ def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_sche
         #plot_loss(train_loss, val_loss)
         tb.add_scalar("Train Loss", train_epoch_loss, epoch)
         tb.add_scalar("Val Loss", val_epoch_loss, epoch)
-        #tb.add_image('Input - Gauss', samples[0])
-        #tb.add_image('Output', samples[1])
-        #tb.add_image('Original -
-        print(samples.shape)
-        img_grid = torchvision.utils.make_grid(samples)
-        tb.add_image("Input - Output - Original", img_grid)
+        tb.add_image('Input - Gauss', blur_img, global_step=epoch)
+        tb.add_image('Output', output, global_step=epoch)
+        tb.add_image('Original', sharp_img, global_step=epoch)
+        #print(samples.shape)
+        #img_grid = torchvision.utils.make_grid(samples)
+        #tb.add_image("Input - Output - Original", img_grid)
 
         if val_epoch_loss < min_loss:
             min_loss = val_epoch_loss
@@ -469,7 +556,6 @@ def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_sche
         print(f"################################ \n")
 
     end = time.time()
-    tb.close()
     print(f"Took {((end - start) / 60):.3f} minutes to train")
 
 def plot_loss(train_loss, val_loss):
@@ -514,6 +600,29 @@ def visual_test(model, optimizer, checkpoint, dataLoader):
                 plt.show()
                 time.sleep(4)
 
+def visual_test_tb(model, optimizer, checkpoint, dataLoader, maxImg):
+    load_checkpoint(checkpoint, model, optimizer)
+    model.eval()
+    print('Visual Test TB!')
+    print("Check . tensorboard --logdir=runs . for logs")
+    tb = SummaryWriter()
+    with torch.no_grad():
+        for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size,
+                                 position=0, leave=True):
+            blur_img = data[0].to(device)
+            sharp_img = data[1].to(device)
+            output = model_RGB(model, blur_img)
+
+            tb.add_images('Input', blur_img[0], global_step=i)
+            tb.add_images('Output', sharp_img[0], global_step=i)
+            tb.add_images('Original', output[0], global_step=i)
+            input()
+            print("Press return to serve new images")
+            if i >= maxImg:
+                break
+
+    tb.close()
+
 def plot_sample(sample1, sample2, sample3, epoch):
     sample1 = np.transpose(sample1, (2, 1, 0))
     fig = plt.figure()
@@ -534,15 +643,20 @@ def plot_sample(sample1, sample2, sample3, epoch):
     plt.close("all")
 
 if __name__ == '__main__':
-    nr_epoch = 100
+    nr_epoch = 25
+    tb = SummaryWriter()
     #matplotlib.use('Agg')
-    trainLoader, valLoader = create_dataset(batch_size=8, noise_level=0.25)
+    trainLoader, valLoader = create_dataset_noise(tb, batch_size=16, noise_level_min=0.1, noise_level_max=0.3)
     #check_pairs(trainLoader)
-
-    model, criterion, lr_scheduler, optimizer = initialize_model(train=True)
-    train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler)
+    checkpoint = './checkpoints/Model_20_26_38.pth'
+    model, criterion, lr_scheduler, optimizer = initialize_model(train=True, checkpoint=checkpoint)
+    model_summary = str(summary(model, input_size=(16, 1, 96, 96), verbose=0))
+    tb.add_text("Model Summary", model_summary)
+    train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb)
     #compare_gauss()
-    #checkpoint = './checkpoints/16-02-2022-DeblurSTD.pth'
+
     #visual_test(model, optimizer, checkpoint, valLoader)
+    #visual_test_tb(model, optimizer, checkpoint, valLoader, maxImg=150)
 
     #image += noise_level * torch.normal(mean=0, std=(image.max() - image.min()) / 6., size=image.shape).cuda()
+    tb.close()
