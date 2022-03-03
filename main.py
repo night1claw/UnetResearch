@@ -1,4 +1,8 @@
+import binascii
+import secrets
+
 import livelossplot
+import pbkdf2
 import tensorboard.summary
 import torch
 import cv2
@@ -22,8 +26,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import base64
 import hashlib
-#from Crypto import Random
-#from Crypto.Cipher import AES
+import pyaes
 
 #################### ML Device #######################################
 device = 'cuda'
@@ -139,57 +142,6 @@ def show_some_images(x, sqrtN, fig_num=99):
             plt.imshow(np.reshape(x[i - 1, :], (96, 96)), cmap='gray')
             plt.axis('off')
             i += 1
-
-
-def check_pairs(dataLoader):
-    for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0,
-                             leave=True):
-        blur_img = data[0]
-        #print(blur_img[0,:,:,:])
-        sharp_img = data[1]
-        image = blur_img[1]
-        image = np.transpose(image, (2, 1, 0))
-        fig = plt.figure()
-        ax = fig.add_subplot(1, 2, 1)
-        imgplot = plt.imshow(image)
-        ax.set_title('Before - Blurred')
-        image = sharp_img[1]
-        image = np.transpose(image, (2, 1, 0))
-
-        ax = fig.add_subplot(1, 2, 2)
-        imgplot = plt.imshow(image)
-        ax.set_title('After - Deblurred')
-        plt.show()
-        time.sleep(4)
-
-# class AESCipher(object):
-#
-#     def __init__(self, key):
-#         self.bs = 32
-#         self.key = hashlib.sha256(key.encode()).digest()
-#
-#     def encrypt(self, raw):
-#         raw = self._pad(raw)
-#         iv = Random.new().read(AES.block_size)
-#         cipher = AES.new(self.key, AES.MODE_CBC, iv)
-#         return base64.b64encode(iv + cipher.encrypt(raw))
-#
-#     def decrypt(self, enc):
-#         enc = base64.b64decode(enc)
-#         iv = enc[:AES.block_size]
-#         cipher = AES.new(self.key, AES.MODE_CBC, iv)
-#         return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
-#         #return self._unpad(cipher.decrypt(enc[AES.block_size:])).decode('utf-8')
-#
-#     def _pad(self, s):
-#         #print("25")
-#         #print(type(s))
-#         #print(type((self.bs - len(s) % self.bs) * chr(self.bs - len(s) % self.bs)))
-#         return s + (self.bs - len(s) % self.bs) * chr(self.bs - len(s) % self.bs).encode('utf-8')
-#
-#     @staticmethod
-#     def _unpad(s):
-#         return s[:-ord(s[len(s)-1:])]
 
 
 #################### Model Helper Functions ##########################
@@ -357,23 +309,14 @@ def create_dataset_noise(tb, batch_size=8, noise_level_min=0.0, noise_level_max=
     images_train = normalize_min_max(images_train, 0.0, 1.0)
     #print("Max input:", np.max(images_train))
     #print("Min input:", np.min(images_train))
-    #images_train_blur = images_train
 
-    #images_train_blur = np.add(images_train, np.random.uniform(noise_level) * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(images_train)) / 6., size=images_train.shape))
     for images in tqdm.tqdm(range(images_train_blur.shape[0]), total=images_train_blur.shape[0]):
         images_train_blur[images] = np.add(images_train_blur[images], np.random.uniform(noise_level_min, noise_level_max) * np.random.normal(loc=0, scale=(np.max(images_train_blur[images]) - np.min(images_train_blur[images])) / 6., size=images_train_blur[images].shape))
     images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
-    #print(images_train_blur.shape)
 
 
 
     (x_train, x_val, y_train, y_val) = train_test_split(images_train_blur, images_train, test_size=0.25)
-    #print("Data shapes:")
-    #print(f"x_train: {x_train.shape}")
-    #print(f"x_val: {x_val.shape}")
-    #print(f"y_train: {y_train.shape}")
-    #print(f"y_val: {y_val.shape}")
-    #print('Done shapes')
 
     train_data = GaussDataset(x_train, y_train)
     train_Loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
@@ -388,17 +331,31 @@ def create_dataset_noise(tb, batch_size=8, noise_level_min=0.0, noise_level_max=
                            "\nValidation size:" + str(y_train.shape[0]))
     random_index = int(np.random.random()*len(images_train))-5
     tb.add_images("Dataset Examples - Original", images_train[random_index:random_index+5])
-    #print("Max input:", np.max(images_train))
-    #print("Min input:", np.min(images_train))
     tb.add_images("Dataset Examples - Blurred", images_train_blur[random_index:random_index+5])
 
     return train_Loader, val_Loader
 
+def encrypt_img(tb, image, key, iv):
+    plaintext = image.tobytes()
+    aes = pyaes.AESModeOfOperationCTR(key, pyaes.Counter(iv))
+    ciphertext = aes.encrypt(plaintext)
+    #print(ciphertext)
+    encrypted_image = np.frombuffer(buffer=ciphertext, dtype=np.float32)
+    encrypted_image = np.nan_to_num(encrypted_image, copy=True, nan=0.0)
+    encrypted_image = normalize_min_max(encrypted_image, 0.0, 1.0)
+    print("Min",np.min(encrypted_image))
+    print("Max",np.max(encrypted_image))
+    encrypted_image = encrypted_image.reshape((3, 96, 96))
+    #print(encrypted_image)
 
-def create_dataset_encrypt(batch_size = 8, key=128):
+
+    return encrypted_image
+
+def create_dataset_encrypt(tb, batch_size = 8, key=128, iv=128):
     images_train = read_images(DATA_PATH_TRAIN)
     print(images_train.shape)
     print(type(images_train))
+    images_train_encrypt = read_images(DATA_PATH_TRAIN)
 
     labels_train = read_labels(LABEL_PATH_TRAIN)
     print(labels_train.shape)
@@ -409,33 +366,37 @@ def create_dataset_encrypt(batch_size = 8, key=128):
     labels_test = read_labels(LABEL_PATH_TEST)
     print(labels_test.shape)
 
-    # images_train_blur = create_blur_set(images_train, kx, ky)
+    images_train = images_train.astype(np.float32)
+    images_train_encrypt = images_train_encrypt.astype(np.float32)
 
     images_train = normalize_min_max(images_train, 0.0, 1.0)
+    images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
 
-    #images_train_blur = np.add(images_train, noise_level * np.random.normal(loc=0, scale=(np.max(images_train) - np.min(
-    #    images_train)) / 6., size=images_train.shape))
-    #images_train_blur = normalize_min_max(images_train_blur, 0.0, 1.0)
-    #print(images_train_blur.shape)
+    for image in range(images_train_encrypt.shape[0]):
+        images_train_encrypt[image] = encrypt_img(tb, images_train_encrypt[image], key, iv)
 
-    #images_train = images_train.astype(np.float32)
-    #images_train_blur = images_train_blur.astype(np.float32)
+    images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
 
-    #(x_train, x_val, y_train, y_val) = train_test_split(images_train_blur, images_train, test_size=0.25)
-    # print("Data shapes:")
-    # print(f"x_train: {x_train.shape}")
-    # print(f"x_val: {x_val.shape}")
-    # print(f"y_train: {y_train.shape}")
-    # print(f"y_val: {y_val.shape}")
-    # print('Done shapes')
+    (x_train, x_val, y_train, y_val) = train_test_split(images_train_encrypt, images_train, test_size=0.25)
 
-    #train_data = GaussDataset(x_train, y_train)
-    #train_Loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    train_data = GaussDataset(x_train, y_train)
+    train_Loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
-    #val_data = GaussDataset(x_val, y_val)
-    #val_Loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    val_data = GaussDataset(x_val, y_val)
+    val_Loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
 
-    #return train_Loader, val_Loader
+    tb.add_text("Dataset Encrypted", "Created dataset with: "
+                "\nKey:" + str(key) + " and IV " + str(iv) +
+                "\nBatch Size: " + str(batch_size) +
+                "\nTraining size: " + str(x_train.shape[0]) +
+                "\nValidation size:" + str(y_train.shape[0]))
+    random_index = int(np.random.random() * len(images_train)) - 5
+    tb.add_images("Dataset Examples - Original", images_train[random_index:random_index + 5])
+    # print("Max input:", np.max(images_train))
+    # print("Min input:", np.min(images_train))
+    tb.add_images("Dataset Examples - Blurred", images_train_encrypt[random_index:random_index + 5])
+
+    return train_Loader, val_Loader
 
 
 def initialize_model(train=False, checkpoint='./checkpoints/latestModel.pth'):
@@ -465,8 +426,8 @@ def train_step(model, dataLoader, optimizer, criterion, epoch):
     running_loss = 0.0
     print(' ')
     print('Train Step:', epoch)
-    for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size, position=0,leave=True):
-    #for i, data in enumerate(dataLoader):
+    #for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size):
+    for i, data in enumerate(dataLoader):
         blur_img = data[0].to(device)
         sharp_img = data[1].to(device)
         optimizer.zero_grad()
@@ -513,7 +474,7 @@ def get_sample(model, dataset):
         output = model_RGB(model, blur_img)
     return blur_img[0], sharp_img[0], output[0]
 
-def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb):
+def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb, model_type):
     train_loss = []
     val_loss = []
     min_loss = sys.float_info.max
@@ -522,11 +483,11 @@ def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_sche
     today = datetime.today()
     today = today.strftime("%y_%m_%d")
     current_time = now.strftime("%H_%M_%S")
-    last_ck = './checkpoints/Model_date_' + today + '_time_' + current_time + '.pth'
+    last_ck = './checkpoints/Model_ ' + model_type + '_date_' + today + '_time_' + current_time + '.pth'
     print("Check . tensorboard --logdir=runs . for logs")
-    tb.add_text("Training model start", "Model trained on:" + today + " at :" + current_time)
+    tb.add_text("Training model start", "Model " + model_type + " trained on:" + today + " at :" + current_time)
 
-    for epoch in range(nr_epoch):
+    for epoch in tqdm.gui.tqdm(range(nr_epoch), total=nr_epoch, desc="Training.. Epoch:"):
         logs = {}
         train_epoch_loss = train_step(model, trainLoader, optimizer, criterion, epoch)
         val_epoch_loss, samples = val_step(model, valLoader, optimizer, criterion, epoch)
@@ -558,54 +519,12 @@ def train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_sche
     end = time.time()
     print(f"Took {((end - start) / 60):.3f} minutes to train")
 
-def plot_loss(train_loss, val_loss):
-     plt.figure(figsize=(10, 7))
-     plt.plot(train_loss, color='orange', label='train loss')
-     plt.plot(val_loss, color='red', label='validataion loss')
-     plt.xlabel('Epochs')
-     plt.ylabel('Loss')
-     plt.savefig('loss.png')
 
-
-def visual_test(model, optimizer, checkpoint, dataLoader):
-    load_checkpoint(checkpoint, model, optimizer)
-    model.eval()
-    print('Visual Test!')
-    with torch.no_grad():
-        for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size,
-                                 position=0, leave=True):
-            blur_img = data[0].to(device)
-            sharp_img = data[1].to(device)
-            output = model_RGB(model, blur_img)
-
-            for index in range(dataLoader.batch_size):
-                sample = blur_img[index].cpu()
-                sample = np.transpose(sample, (2, 1, 0))
-                fig = plt.figure()
-                ax = fig.add_subplot(1, 3, 1)
-                imgplot = plt.imshow(sample)
-                ax.set_title('Before - Blurred')
-
-                sample = output[index].cpu()
-                sample = np.transpose(sample, (2, 1, 0))
-                ax = fig.add_subplot(1, 3, 2)
-                imgplot = plt.imshow(sample)
-                ax.set_title('Predicted - Sharp')
-
-                sample = sharp_img[index].cpu()
-                sample = np.transpose(sample, (2, 1, 0))
-                ax = fig.add_subplot(1, 3, 3)
-                imgplot = plt.imshow(sample)
-                ax.set_title('Target - Sharp')
-                plt.show()
-                time.sleep(4)
-
-def visual_test_tb(model, optimizer, checkpoint, dataLoader, maxImg):
+def visual_test_tb(tb, model, optimizer, checkpoint, dataLoader, maxImg):
     load_checkpoint(checkpoint, model, optimizer)
     model.eval()
     print('Visual Test TB!')
     print("Check . tensorboard --logdir=runs . for logs")
-    tb = SummaryWriter()
     with torch.no_grad():
         for i, data in tqdm.tqdm(enumerate(dataLoader), total=len(dataLoader.dataset) / dataLoader.batch_size,
                                  position=0, leave=True):
@@ -623,40 +542,62 @@ def visual_test_tb(model, optimizer, checkpoint, dataLoader, maxImg):
 
     tb.close()
 
-def plot_sample(sample1, sample2, sample3, epoch):
-    sample1 = np.transpose(sample1, (2, 1, 0))
-    fig = plt.figure()
-    ax = fig.add_subplot(1, 3, 1)
-    imgplot = plt.imshow(sample1)
-    ax.set_title('Before - Blurred')
 
-    sample2 = np.transpose(sample2, (2, 1, 0))
-    ax = fig.add_subplot(1, 3, 2)
-    imgplot = plt.imshow(sample2)
-    ax.set_title('Predicted - Sharp')
+def create_key():
+    iv = secrets.randbits(128)
 
-    sample3 = np.transpose(sample3, (2, 1, 0))
-    ax = fig.add_subplot(1, 3, 3)
-    imgplot = plt.imshow(sample3)
-    ax.set_title('Target - Sharp')
-    plt.savefig("./comparisons/Comparison-Epoch" + str(epoch) + ".png")
-    plt.close("all")
+    password = "password"
+    passwordSalt = os.urandom(16)
+    print("Salt =", passwordSalt)
+
+    key = pbkdf2.PBKDF2(password, passwordSalt).read(32)
+    print("Returned Key = ", key)
+    print('AES encryption key:', binascii.hexlify(key))
+
+    print("Generated Key: ", key)
+    print("Generated IV:", iv)
+
+    return key, iv
+
 
 if __name__ == '__main__':
-    nr_epoch = 25
     tb = SummaryWriter()
-    #matplotlib.use('Agg')
-    trainLoader, valLoader = create_dataset_noise(tb, batch_size=16, noise_level_min=0.1, noise_level_max=0.3)
-    #check_pairs(trainLoader)
+    nr_epoch = 25
+    batch_size = 8
     checkpoint = './checkpoints/Model_20_26_38.pth'
+
+    encryption_mode = True
+    key = b'\xc1K\x892W;\x1f:\x85\xf6\xd5Y\x9a\xf8\tC7\xb4\x10e/\xe7\xe5\xabCk\x81\xfc\x0e\x9d\xd7S'
+    iv = 332542084769990911851079446621223860291
+
+    noise_level_min = 0.1
+    noise_level_max = 0.3
+
+    if encryption_mode:
+        print("Encrpytion model")
+        model_type = "Encrypt"
+
+        if key is None or iv is None:
+            print("Using generated key:")
+            key, iv = create_key()
+
+        tb.add_text("Encryption values", "Key=" + str(key) + "\nIV=" + str(iv))
+
+        trainLoader, valLoader = create_dataset_encrypt(tb, batch_size=batch_size, key=key, iv=iv)
+
+    else:
+        print("Gauss model")
+        model_type = "Gauss"
+        trainLoader, valLoader = create_dataset_noise(tb, batch_size=batch_size, noise_level_min=noise_level_min, noise_level_max=noise_level_max)
+
+
     model, criterion, lr_scheduler, optimizer = initialize_model(train=True, checkpoint=checkpoint)
     model_summary = str(summary(model, input_size=(16, 1, 96, 96), verbose=0))
     tb.add_text("Model Summary", model_summary)
-    train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb)
-    #compare_gauss()
+    input()
 
-    #visual_test(model, optimizer, checkpoint, valLoader)
-    #visual_test_tb(model, optimizer, checkpoint, valLoader, maxImg=150)
+    #train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb, model_type=model_type)
 
-    #image += noise_level * torch.normal(mean=0, std=(image.max() - image.min()) / 6., size=image.shape).cuda()
+    #visual_test_tb(tb, model, optimizer, checkpoint, valLoader, maxImg=150)
+
     tb.close()
