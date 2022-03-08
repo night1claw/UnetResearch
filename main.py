@@ -265,6 +265,19 @@ def model_RGB(model, img_in):
   #print(img_out.shape)
   return img_out
 
+
+def unpack_3d(model, img_in):
+    dim3d = img_in.shape[1]
+    img_2d = model(img_in[:, 0, :, :].unsqueeze(1))
+    if dim3d > 1:
+        for dim in range(dim3d):
+            img_2d_new = model(img_in[:, dim+1, :, :].unsqueeze(1))
+            img_2d = torch.cat((img_2d, img_2d_new), dim=1)
+    img_out = torch.clamp(img_2d, 0., 1.)
+    #print(img_out.shape)
+    return img_out
+
+
 class GaussDataset(Dataset):
     def __init__(self, blur_paths, sharp_paths=None):
         self.X = blur_paths
@@ -335,27 +348,35 @@ def create_dataset_noise(tb, batch_size=8, noise_level_min=0.0, noise_level_max=
 
     return train_Loader, val_Loader
 
+
 def encrypt_img(tb, image, key, iv):
     plaintext = image.tobytes()
     aes = pyaes.AESModeOfOperationCTR(key, pyaes.Counter(iv))
     ciphertext = aes.encrypt(plaintext)
+    #print("Cyp:", len(ciphertext))
     #print(ciphertext)
-    encrypted_image = np.frombuffer(buffer=ciphertext, dtype=np.float32)
-    encrypted_image = np.nan_to_num(encrypted_image, copy=True, nan=0.0)
-    encrypted_image = normalize_min_max(encrypted_image, 0.0, 1.0)
-    print("Min",np.min(encrypted_image))
-    print("Max",np.max(encrypted_image))
-    encrypted_image = encrypted_image.reshape((3, 96, 96))
+    encrypted_image = np.frombuffer(buffer=ciphertext, dtype=np.uint8)
+    encrypted_image = encrypted_image.astype(np.float32)
+    #print(ciphertext[0])
+    #print(encrypted_image[0])
+    #encrypted_image = np.nan_to_num(encrypted_image, copy=True, nan=0.0)
+    #print("Min", np.min(encrypted_image))
+    #print("Max", np.max(encrypted_image))
+    #encrypted_image = normalize_min_max(encrypted_image, 0.0, 1.0)
+    #print("Min",np.min(encrypted_image))
+    #print("Max",np.max(encrypted_image))
+    encrypted_image = encrypted_image.reshape((12, 96, 96))
     #print(encrypted_image)
 
 
     return encrypted_image
 
-def create_dataset_encrypt(tb, batch_size = 8, key=128, iv=128):
+
+def create_dataset_encrypt(tb, batch_size = 8, key=128, iv=128, new=False, dataset_name="EncriptedDataset.npy"):
+
     images_train = read_images(DATA_PATH_TRAIN)
     print(images_train.shape)
     print(type(images_train))
-    images_train_encrypt = read_images(DATA_PATH_TRAIN)
 
     labels_train = read_labels(LABEL_PATH_TRAIN)
     print(labels_train.shape)
@@ -367,13 +388,37 @@ def create_dataset_encrypt(tb, batch_size = 8, key=128, iv=128):
     print(labels_test.shape)
 
     images_train = images_train.astype(np.float32)
-    images_train_encrypt = images_train_encrypt.astype(np.float32)
 
     images_train = normalize_min_max(images_train, 0.0, 1.0)
-    images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
 
-    for image in range(images_train_encrypt.shape[0]):
-        images_train_encrypt[image] = encrypt_img(tb, images_train_encrypt[image], key, iv)
+    if new:
+        images_train_encrypt = read_images(DATA_PATH_TRAIN)
+        images_train_encrypt = images_train_encrypt.astype(np.float32)
+        #images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
+
+        temp = encrypt_img(tb, images_train_encrypt[0], key, iv)
+        temp = temp[np.newaxis, ...]
+        for image in tqdm.tqdm(range(images_train_encrypt.shape[0]-1), total=images_train_encrypt.shape[0]-1):
+            result = encrypt_img(tb, images_train_encrypt[image+1], key, iv)
+            temp = np.concatenate((temp, result[np.newaxis, ...]))
+            #print(temp.shape)
+        images_train_encrypt = temp
+
+        now = datetime.now()
+        today = datetime.today()
+        today = today.strftime("%y_%m_%d")
+        current_time = now.strftime("%H_%M_%S")
+        dataset_name = 'EncriptedDataset_' + model_type + '_date_' + today + '_time_' + current_time
+
+        np.save(dataset_name, images_train_encrypt)
+        print("Saved dataset to:" + dataset_name)
+
+        #images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
+
+    else:
+        print("Loading dataset from:" + dataset_name)
+        images_train_encrypt = np.load(dataset_name)
+        input()
 
     images_train_encrypt = normalize_min_max(images_train_encrypt, 0.0, 1.0)
 
@@ -394,7 +439,7 @@ def create_dataset_encrypt(tb, batch_size = 8, key=128, iv=128):
     tb.add_images("Dataset Examples - Original", images_train[random_index:random_index + 5])
     # print("Max input:", np.max(images_train))
     # print("Min input:", np.min(images_train))
-    tb.add_images("Dataset Examples - Blurred", images_train_encrypt[random_index:random_index + 5])
+    tb.add_images("Dataset Examples - Encrypted", images_train_encrypt[random_index:random_index + 5])
 
     return train_Loader, val_Loader
 
@@ -550,7 +595,7 @@ def create_key():
     passwordSalt = os.urandom(16)
     print("Salt =", passwordSalt)
 
-    key = pbkdf2.PBKDF2(password, passwordSalt).read(32)
+    key = pbkdf2.PBKDF2(password, passwordSalt).read(16)
     print("Returned Key = ", key)
     print('AES encryption key:', binascii.hexlify(key))
 
@@ -567,8 +612,8 @@ if __name__ == '__main__':
     checkpoint = './checkpoints/Model_20_26_38.pth'
 
     encryption_mode = True
-    key = b'\xc1K\x892W;\x1f:\x85\xf6\xd5Y\x9a\xf8\tC7\xb4\x10e/\xe7\xe5\xabCk\x81\xfc\x0e\x9d\xd7S'
-    iv = 332542084769990911851079446621223860291
+    key = b']\xad\xf8,\xc6\x95\x86v\xd7\x11y\xf2\xc8\\n\xee'
+    iv = 204520598923556323596093645128514940334
 
     noise_level_min = 0.1
     noise_level_max = 0.3
@@ -583,7 +628,7 @@ if __name__ == '__main__':
 
         tb.add_text("Encryption values", "Key=" + str(key) + "\nIV=" + str(iv))
 
-        trainLoader, valLoader = create_dataset_encrypt(tb, batch_size=batch_size, key=key, iv=iv)
+        trainLoader, valLoader = create_dataset_encrypt(tb, batch_size=batch_size, key=key, iv=iv, new=False, dataset_name="EncriptedDataset.npy")
 
     else:
         print("Gauss model")
@@ -599,5 +644,7 @@ if __name__ == '__main__':
     #train(nr_epoch, model, trainLoader, valLoader, optimizer, criterion, lr_scheduler, tb, model_type=model_type)
 
     #visual_test_tb(tb, model, optimizer, checkpoint, valLoader, maxImg=150)
+
+    #TO-DO Extra: Input transform from 12 to 3 (encrypt to RGB)
 
     tb.close()
